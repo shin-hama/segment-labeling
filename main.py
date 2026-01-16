@@ -1,14 +1,15 @@
-import gradio as gr
-import numpy as np
-from segment_anything import sam_model_registry, SamPredictor
-import torch
-from PIL import Image, ImageDraw
-import cv2
 import csv
 import json
 import tempfile
-import os
 from datetime import datetime
+from typing import Optional
+
+import cv2
+import gradio as gr
+import numpy as np
+import torch
+from PIL import Image, ImageDraw
+from segment_anything import SamPredictor, sam_model_registry
 
 
 # SAMモデルの初期化
@@ -29,9 +30,9 @@ predictor = initialize_sam()
 # グローバル状態の管理
 class AnnotationState:
     def __init__(self):
-        self.current_image = None
-        self.current_masks = []
-        self.current_scores = []
+        self.current_image: Optional[np.ndarray] = None
+        self.current_masks: Optional[np.ndarray] = None
+        self.current_scores: Optional[np.ndarray] = None
         self.annotations = []  # {mask, label, center, polygon}
         self.selected_mask_idx = None
 
@@ -103,7 +104,7 @@ def visualize_annotations(image, annotations):
 
         # ラベルテキストを描画
         draw = ImageDraw.Draw(overlay)
-        draw.text(center, f"{i+1}: {label}", fill=(255, 255, 255, 255))
+        draw.text(center, f"{i + 1}: {label}", fill=(255, 255, 255, 255))
 
     result = Image.alpha_composite(result, overlay)
     return result.convert("RGB")
@@ -176,6 +177,9 @@ def add_annotation(label_text):
     """アノテーションを追加"""
     if state.selected_mask_idx is None:
         return None, "先にマスクを選択してください", gr.update(value="")
+
+    if state.current_masks is None:
+        return None, "先にセグメンテーションを実行してください", gr.update(value="")
 
     if not label_text or label_text.strip() == "":
         return None, "ラベルを入力してください", gr.update(value="")
