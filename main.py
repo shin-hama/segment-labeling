@@ -5,9 +5,7 @@ import torch
 from PIL import Image, ImageDraw, ImageFont
 import cv2
 import csv
-import json
 import tempfile
-import os
 from datetime import datetime
 
 
@@ -29,11 +27,10 @@ predictor = initialize_sam()
 # グローバル状態の管理
 class AnnotationState:
     def __init__(self):
-        self.current_image = None
-        self.current_masks = []
-        self.current_scores = []
+        self.current_image: None | np.ndarray = None
+        self.current_masks: np.ndarray = np.array([])
         self.annotations = []
-        self.selected_mask_idx = None
+        self.selected_mask_idx: None | int = None
         self.mode = "ai"  # 'ai' or 'manual'
         self.manual_points = []  # 手動モードでの頂点リスト
 
@@ -92,6 +89,8 @@ def draw_polygon_preview(image, points):
     overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
 
+    imageSize = image.shape[1], image.shape[0]
+    lineWidth = max(1, min(imageSize) // 200)
     # 頂点を描画
     for point in points:
         x, y = point
@@ -99,21 +98,22 @@ def draw_polygon_preview(image, points):
             [x - 5, y - 5, x + 5, y + 5],
             fill=(255, 0, 0, 255),
             outline=(255, 255, 255, 255),
+            width=lineWidth,
         )
 
     # 線を描画
     if len(points) > 1:
-        draw.line(points, fill=(255, 255, 0, 200), width=2)
+        draw.line(points, fill=(255, 255, 0, 200), width=lineWidth)
 
     # 最初の点と最後の点を結ぶ線（多角形の閉じる予定の線）
     if len(points) > 2:
-        draw.line([points[-1], points[0]], fill=(255, 255, 0, 100), width=2)
+        draw.line([points[-1], points[0]], fill=(255, 255, 0, 100), width=lineWidth)
 
     result = Image.alpha_composite(img, overlay)
     return result.convert("RGB")
 
 
-def visualize_annotations(image, annotations, preview_points=None):
+def visualize_annotations(image: None | np.ndarray, annotations, preview_points=None):
     """現在のアノテーション一覧を可視化"""
     if image is None:
         return None
@@ -146,7 +146,9 @@ def visualize_annotations(image, annotations, preview_points=None):
 
         # ラベルテキストを描画
         draw = ImageDraw.Draw(overlay)
-        font = ImageFont.load_default(24)
+        imageSize = image.shape[1], image.shape[0]
+        fontSize = int(min(imageSize) / 20)
+        font = ImageFont.load_default(fontSize)
         draw.text(
             center,
             f"{i + 1}: {label}",
@@ -219,7 +221,7 @@ def change_mode(mode):
         )
 
 
-def on_image_click(image, evt: gr.SelectData):
+def on_image_click(image: None | np.ndarray, evt: gr.SelectData):
     """画像クリック時の処理（モードによって分岐）"""
     if state.current_image is None:
         return (
@@ -243,7 +245,7 @@ def on_image_click(image, evt: gr.SelectData):
         )
 
         state.current_masks = masks
-        state.current_scores = scores
+        state.selected_mask_idx = None
 
         # 結果の可視化
         results = []
@@ -262,7 +264,6 @@ def on_image_click(image, evt: gr.SelectData):
             results,
             "セグメンテーション結果から最適なものを選択してください",
             gr.update(visible=True),
-            None,
             state.current_image,
         )
 
@@ -275,16 +276,10 @@ def on_image_click(image, evt: gr.SelectData):
             state.current_image, state.manual_points
         )
 
-        # アノテーション済み画像にも編集中のポリゴンを表示
-        preview_image = visualize_annotations(
-            state.current_image, state.annotations, state.manual_points
-        )
-
         return (
             None,
             f"頂点 {len(state.manual_points)} を追加しました。続けてクリックするか、「多角形を完成」ボタンを押してください",
             gr.update(visible=False),
-            preview_image,
             original_with_polygon,
         )
 
@@ -293,6 +288,8 @@ def complete_polygon():
     """手動モードで多角形を完成させる"""
     if len(state.manual_points) < 3:
         return None, "最低3つの頂点が必要です", None
+    if state.current_image is None:
+        return None, "先に画像をアップロードしてください", None
 
     # 多角形からマスクを生成
     mask = polygon_to_mask(state.manual_points, state.current_image.shape)
@@ -307,7 +304,7 @@ def complete_polygon():
     combined = Image.alpha_composite(base_img, mask_img)
 
     # 状態に保存
-    state.current_masks = [mask]
+    state.current_masks = np.array([mask])
     state.selected_mask_idx = 0
 
     return (
@@ -405,13 +402,39 @@ def export_annotations():
         writer = csv.writer(temp_file)
 
         # ヘッダー
-        writer.writerow(["no", "type", "center_x", "center_y", "polygon"])
+        writer.writerow(
+            [
+                "no",
+                "type",
+                "center_x",
+                "center_y",
+                "polygon",
+                "flip",
+                "rotation",
+                "fraction",
+                "confidfence",
+                "flip_confidence",
+                "rotation_confidence",
+            ]
+        )
 
         # データ行
         for i, ann in enumerate(state.annotations, 1):
-            polygon_str = json.dumps(ann["polygon"])
+            polygon_str = str([tuple(inner) for inner in ann["polygon"]])
             writer.writerow(
-                [i, ann["label"], ann["center"][0], ann["center"][1], polygon_str]
+                [
+                    i,
+                    ann["label"],
+                    ann["center"][0],
+                    ann["center"][1],
+                    polygon_str,
+                    1,
+                    0,
+                    0.9,
+                    -1,
+                    -1,
+                    -1,
+                ]
             )
 
         temp_file.close()
@@ -466,34 +489,28 @@ with gr.Blocks(title="SAM Interactive Annotation Tool") as demo:
         - 完了したらExportボタンでCSVをダウンロード
         """)
 
-    # モード選択
-    mode_radio = gr.Radio(
-        choices=["ai", "manual"],
-        value="ai",
-        label="アノテーションモード",
-        info="AI: SAMによる自動セグメンテーション / 手動: 多角形を手動で描画",
+    status_text = gr.Textbox(
+        label="ステータス",
+        value="画像をアップロードしてください",
+        interactive=False,
     )
 
     with gr.Row():
         with gr.Column(scale=1):
             input_image = gr.Image(label="1. 画像をアップロード", type="pil")
 
-            status_text = gr.Textbox(
-                label="ステータス",
-                value="画像をアップロードしてください",
-                interactive=False,
+            # モード選択
+            mode_radio = gr.Radio(
+                choices=["ai", "manual"],
+                value="ai",
+                label="アノテーションモード",
+                info="AI: SAMによる自動セグメンテーション / 手動: 多角形を手動で描画",
             )
 
             # 手動モード用ボタン
             with gr.Row(visible=False) as manual_buttons:
                 complete_polygon_btn = gr.Button("多角形を完成", variant="primary")
                 cancel_polygon_btn = gr.Button("キャンセル", variant="secondary")
-
-            with gr.Row():
-                clear_btn = gr.Button("すべてクリア", variant="secondary")
-                export_btn = gr.Button("Export CSV", variant="primary")
-
-            csv_output = gr.File(label="エクスポートされたCSV")
 
         with gr.Column(scale=1):
             annotated_display = gr.Image(label="アノテーション済み画像", type="pil")
@@ -505,13 +522,21 @@ with gr.Blocks(title="SAM Interactive Annotation Tool") as demo:
         visible=False,
     )
 
-    manual_preview = gr.Image(label="多角形プレビュー", type="pil", visible=False)
+    manual_preview = gr.Image(
+        label="多角形プレビュー", type="pil", visible=False, height=300
+    )
 
     with gr.Row():
         label_input = gr.Textbox(
             label="3. ラベル名を入力", placeholder="例: person, car, tree"
         )
         add_label_btn = gr.Button("4. ラベルを追加", variant="primary")
+
+    with gr.Row():
+        clear_btn = gr.Button("すべてクリア", variant="secondary")
+        export_btn = gr.Button("Export CSV", variant="primary")
+
+    csv_output = gr.File(label="エクスポートされたCSV")
 
     # イベント設定
     input_image.upload(
@@ -541,7 +566,6 @@ with gr.Blocks(title="SAM Interactive Annotation Tool") as demo:
             mask_gallery,
             status_text,
             mask_gallery,
-            annotated_display,
             input_image,
         ],
     )
