@@ -333,7 +333,7 @@ def add_annotation(label_text):
         f"ラベル '{label_text}' を追加しました（全{len(state.annotations)}件, {mode_text}モード）。次の領域を選択してください",
         gr.update(value=""),
         state.current_image,
-        gr.update(visible=False),
+        gr.update(value=None, visible=False),
     )
 
 
