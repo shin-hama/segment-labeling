@@ -263,11 +263,19 @@ def on_image_click(image, evt: gr.SelectData):
             "セグメンテーション結果から最適なものを選択してください",
             gr.update(visible=True),
             None,
+            state.current_image,
         )
 
     else:
         # 手動モード: 頂点を追加
         state.manual_points.append((x, y))
+
+        # オリジナル画像上にも編集中のポリゴンを表示
+        original_with_polygon = draw_polygon_preview(
+            state.current_image, state.manual_points
+        )
+
+        # アノテーション済み画像にも編集中のポリゴンを表示
         preview_image = visualize_annotations(
             state.current_image, state.annotations, state.manual_points
         )
@@ -277,6 +285,7 @@ def on_image_click(image, evt: gr.SelectData):
             f"頂点 {len(state.manual_points)} を追加しました。続けてクリックするか、「多角形を完成」ボタンを押してください",
             gr.update(visible=False),
             preview_image,
+            original_with_polygon,
         )
 
 
@@ -305,6 +314,7 @@ def complete_polygon():
         combined.convert("RGB"),
         "多角形が完成しました。ラベルを入力して追加してください",
         visualize_annotations(state.current_image, state.annotations),
+        state.current_image,
     )
 
 
@@ -312,7 +322,11 @@ def cancel_polygon():
     """手動モードで描画中の多角形をキャンセル"""
     state.manual_points = []
     preview_image = visualize_annotations(state.current_image, state.annotations)
-    return preview_image, "描画をキャンセルしました"
+    return (
+        preview_image,
+        "描画をキャンセルしました",
+        state.current_image,
+    )
 
 
 def select_mask(evt: gr.SelectData):
@@ -523,17 +537,24 @@ with gr.Blocks(title="SAM Interactive Annotation Tool") as demo:
     input_image.select(
         fn=on_image_click,
         inputs=[input_image],
-        outputs=[mask_gallery, status_text, mask_gallery, annotated_display],
+        outputs=[
+            mask_gallery,
+            status_text,
+            mask_gallery,
+            annotated_display,
+            input_image,
+        ],
     )
 
     mask_gallery.select(fn=select_mask, outputs=[status_text])
 
     complete_polygon_btn.click(
-        fn=complete_polygon, outputs=[manual_preview, status_text, annotated_display]
+        fn=complete_polygon,
+        outputs=[manual_preview, status_text, annotated_display, input_image],
     )
 
     cancel_polygon_btn.click(
-        fn=cancel_polygon, outputs=[annotated_display, status_text]
+        fn=cancel_polygon, outputs=[annotated_display, status_text, input_image]
     )
 
     add_label_btn.click(
