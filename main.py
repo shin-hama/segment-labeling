@@ -2,7 +2,6 @@ import gradio as gr
 import numpy as np
 from segment_anything import sam_model_registry, SamPredictor
 import torch
-from PIL import Image, ImageDraw, ImageFont
 import cv2
 import csv
 import tempfile
@@ -80,106 +79,86 @@ def get_mask_center(mask):
     return center_x, center_y
 
 
-def draw_polygon_preview(image, points):
+def draw_polygon_preview(image: None | np.ndarray, points):
     """描画中の多角形をプレビュー表示"""
     if image is None or len(points) == 0:
         return image
 
-    img = Image.fromarray(image).convert("RGBA")
-    overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
-    draw = ImageDraw.Draw(overlay)
+    # 元の画像をコピー（NumPy配列として処理）
+    img = image.copy()
 
     imageSize = image.shape[1], image.shape[0]
     lineWidth = max(1, min(imageSize) // 200)
-    # 頂点を描画
-    for point in points:
-        x, y = point
-        draw.ellipse(
-            [x - 5, y - 5, x + 5, y + 5],
-            fill=(255, 0, 0, 255),
-            outline=(255, 255, 255, 255),
-            width=lineWidth,
-        )
 
     # 線を描画
     if len(points) > 1:
-        draw.line(points, fill=(255, 255, 0, 200), width=lineWidth)
+        pts = np.array(points, dtype=np.int32)
+        cv2.polylines(img, [pts], False, (0, 255, 255), lineWidth)
 
-    # 最初の点と最後の点を結ぶ線（多角形の閉じる予定の線）
+    # 最初の点と最後の点を結ぶ線（薄い色で）
     if len(points) > 2:
-        draw.line([points[-1], points[0]], fill=(255, 255, 0, 100), width=lineWidth)
+        cv2.line(
+            img, tuple(points[-1]), tuple(points[0]), (0, 255, 255), lineWidth // 2
+        )
 
-    result = Image.alpha_composite(img, overlay)
-    return result.convert("RGB")
+    # 頂点を描画
+    for point in points:
+        x, y = int(point[0]), int(point[1])
+        cv2.circle(img, (x, y), 5, (0, 0, 255), -1)  # 塗りつぶし
+        cv2.circle(img, (x, y), 5, (255, 255, 255), lineWidth)  # 外枠
+
+    return img
 
 
-def visualize_annotations(image: None | np.ndarray, annotations, preview_points=None):
-    """現在のアノテーション一覧を可視化"""
+def visualize_annotations(image: None | np.ndarray, annotations):
+    """現在のアノテーション一覧を可視化（高速版）"""
     if image is None:
         return None
 
-    # 色のパレット
+    # 色のパレット (BGR形式)
     colors = [
-        (255, 0, 0, 128),  # 赤
-        (0, 255, 0, 128),  # 緑
-        (0, 0, 255, 128),  # 青
-        (255, 255, 0, 128),  # 黄
-        (255, 0, 255, 128),  # マゼンタ
-        (0, 255, 255, 128),  # シアン
+        np.array([0, 0, 255]),  # 赤
+        np.array([0, 255, 0]),  # 緑
+        np.array([255, 0, 0]),  # 青
+        np.array([0, 255, 255]),  # 黄
+        np.array([255, 0, 255]),  # マゼンタ
+        np.array([255, 255, 0]),  # シアン
     ]
 
-    result = Image.fromarray(image).convert("RGBA")
-    overlay = Image.new("RGBA", result.size, (0, 0, 0, 0))
-    draw = ImageDraw.Draw(overlay)
+    result = image.copy()
+    overlay = np.zeros_like(image)
 
+    # アノテーションを描画
     for i, ann in enumerate(annotations):
         color = colors[i % len(colors)]
         mask = ann["mask"]
         label = ann["label"]
         center = ann["center"]
 
-        # マスクを描画
-        mask_overlay = np.zeros((*mask.shape, 4), dtype=np.uint8)
-        mask_overlay[mask] = color
-        mask_img = Image.fromarray(mask_overlay, mode="RGBA")
-        overlay = Image.alpha_composite(overlay, mask_img)
+        # マスクを描画（overlayに色を塗る）
+        overlay[mask] = color
 
         # ラベルテキストを描画
-        draw = ImageDraw.Draw(overlay)
         imageSize = image.shape[1], image.shape[0]
-        fontSize = int(min(imageSize) / 20)
-        font = ImageFont.load_default(fontSize)
-        draw.text(
-            center,
+        fontSize = min(imageSize) / 1000  # OpenCVのフォントサイズ
+        thickness = max(1, int(min(imageSize) / 500))
+
+        cv2.putText(
+            result,
             f"{i + 1}: {label}",
-            fill=(255, 255, 255, 255),
-            font=font,
+            tuple(map(int, center)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            fontSize,
+            (255, 255, 255),
+            thickness,
+            cv2.LINE_AA,
         )
 
-    result = Image.alpha_composite(result, overlay)
+        # オーバーレイを半透明で合成
+        alpha = 0.5
+        result[mask] = result[mask] * (1 - alpha) + color * alpha
 
-    # プレビュー中の多角形を描画
-    if preview_points and len(preview_points) > 0:
-        draw = ImageDraw.Draw(result)
-        for point in preview_points:
-            x, y = point
-            draw.ellipse(
-                [x - 5, y - 5, x + 5, y + 5],
-                fill=(255, 0, 0, 255),
-                outline=(255, 255, 255, 255),
-            )
-
-        if len(preview_points) > 1:
-            draw.line(preview_points, fill=(255, 255, 0, 255), width=2)
-
-        if len(preview_points) > 2:
-            draw.line(
-                [preview_points[-1], preview_points[0]],
-                fill=(255, 255, 0, 128),
-                width=2,
-            )
-
-    return result.convert("RGB")
+    return result
 
 
 def upload_image(image):
@@ -195,7 +174,6 @@ def upload_image(image):
         gr.update(visible=False),
         gr.update(value=""),
         gr.update(visible=False),
-        gr.update(visible=False),
     )
 
 
@@ -209,13 +187,11 @@ def change_mode(mode):
         return (
             "AIモード: 画像上をクリックしてセグメンテーションを実行します",
             gr.update(visible=False),
-            gr.update(visible=False),
             visualize_annotations(state.current_image, state.annotations),
         )
     else:
         return (
             "手動モード: 画像上をクリックして多角形の頂点を設定します",
-            gr.update(visible=True),
             gr.update(visible=True),
             visualize_annotations(state.current_image, state.annotations),
         )
@@ -250,15 +226,15 @@ def on_image_click(image: None | np.ndarray, evt: gr.SelectData):
         # 結果の可視化
         results = []
         for i, (mask, score) in enumerate(zip(masks, scores)):
-            colored_mask = np.zeros((*mask.shape, 4), dtype=np.uint8)
-            colored_mask[mask] = [255, 0, 0, 128]
+            result_image = state.current_image.copy().astype(np.float32)
 
-            result_image = state.current_image.copy()
-            mask_img = Image.fromarray(colored_mask, mode="RGBA")
-            base_img = Image.fromarray(result_image).convert("RGBA")
-            combined = Image.alpha_composite(base_img, mask_img)
+            # マスク領域を赤色で半透明に塗る
+            color = np.array([0, 0, 255], dtype=np.float32)  # BGR: 赤
+            alpha = 0.5
+            result_image[mask] = result_image[mask] * (1 - alpha) + color * alpha
 
-            results.append(combined.convert("RGB"))
+            result_image = result_image.astype(np.uint8)
+            results.append(result_image)
 
         return (
             results,
@@ -270,6 +246,12 @@ def on_image_click(image: None | np.ndarray, evt: gr.SelectData):
     else:
         # 手動モード: 頂点を追加
         state.manual_points.append((x, y))
+        if len(state.manual_points) >= 3:
+            # 多角形からマスクを生成
+            mask = polygon_to_mask(state.manual_points, state.current_image.shape)
+
+            state.current_masks = np.array([mask])
+            state.selected_mask_idx = 0
 
         # オリジナル画像上にも編集中のポリゴンを表示
         original_with_polygon = draw_polygon_preview(
@@ -278,41 +260,10 @@ def on_image_click(image: None | np.ndarray, evt: gr.SelectData):
 
         return (
             None,
-            f"頂点 {len(state.manual_points)} を追加しました。続けてクリックするか、「多角形を完成」ボタンを押してください",
+            f"頂点 {len(state.manual_points)} を追加しました。続けてクリックするか、ラベル名を入力して「多角形を完成」ボタンを押してください。",
             gr.update(visible=False),
             original_with_polygon,
         )
-
-
-def complete_polygon():
-    """手動モードで多角形を完成させる"""
-    if len(state.manual_points) < 3:
-        return None, "最低3つの頂点が必要です", None
-    if state.current_image is None:
-        return None, "先に画像をアップロードしてください", None
-
-    # 多角形からマスクを生成
-    mask = polygon_to_mask(state.manual_points, state.current_image.shape)
-
-    # マスクを可視化
-    colored_mask = np.zeros((*mask.shape, 4), dtype=np.uint8)
-    colored_mask[mask] = [255, 0, 0, 128]
-
-    result_image = state.current_image.copy()
-    mask_img = Image.fromarray(colored_mask, mode="RGBA")
-    base_img = Image.fromarray(result_image).convert("RGBA")
-    combined = Image.alpha_composite(base_img, mask_img)
-
-    # 状態に保存
-    state.current_masks = np.array([mask])
-    state.selected_mask_idx = 0
-
-    return (
-        combined.convert("RGB"),
-        "多角形が完成しました。ラベルを入力して追加してください",
-        visualize_annotations(state.current_image, state.annotations),
-        state.current_image,
-    )
 
 
 def cancel_polygon():
@@ -339,7 +290,8 @@ def add_annotation(label_text):
             None,
             "先にマスクを選択するか、手動モードで多角形を完成させてください",
             gr.update(value=""),
-            None,
+            state.current_image,
+            gr.update(visible=True),
         )
 
     if not label_text or label_text.strip() == "":
@@ -380,7 +332,8 @@ def add_annotation(label_text):
         annotated_image,
         f"ラベル '{label_text}' を追加しました（全{len(state.annotations)}件, {mode_text}モード）。次の領域を選択してください",
         gr.update(value=""),
-        annotated_image,
+        state.current_image,
+        gr.update(visible=False),
     )
 
 
@@ -461,7 +414,6 @@ def clear_all():
         gr.update(value=""),
         None,
         gr.update(visible=False),
-        gr.update(visible=False),
     )
 
 
@@ -481,11 +433,10 @@ with gr.Blocks(title="SAM Interactive Annotation Tool") as demo:
         1. 画像をアップロード
         2. モードを「手動」に切り替え
         3. 多角形の頂点をクリックで設定（3点以上）
-        4. 「多角形を完成」ボタンをクリック
-        5. ラベルを入力して追加
+        4. ラベルを入力して追加
 
         ### 共通
-        - 2-5を繰り返してすべての領域にラベル付け
+        - 2-4を繰り返してすべての領域にラベル付け
         - 完了したらExportボタンでCSVをダウンロード
         """)
 
@@ -522,10 +473,6 @@ with gr.Blocks(title="SAM Interactive Annotation Tool") as demo:
         visible=False,
     )
 
-    manual_preview = gr.Image(
-        label="多角形プレビュー", type="pil", visible=False, height=300
-    )
-
     with gr.Row():
         label_input = gr.Textbox(
             label="3. ラベル名を入力", placeholder="例: person, car, tree"
@@ -549,14 +496,13 @@ with gr.Blocks(title="SAM Interactive Annotation Tool") as demo:
             mask_gallery,
             label_input,
             manual_buttons,
-            manual_preview,
         ],
     )
 
     mode_radio.change(
         fn=change_mode,
         inputs=[mode_radio],
-        outputs=[status_text, manual_buttons, manual_preview, annotated_display],
+        outputs=[status_text, manual_buttons, annotated_display],
     )
 
     input_image.select(
@@ -572,11 +518,6 @@ with gr.Blocks(title="SAM Interactive Annotation Tool") as demo:
 
     mask_gallery.select(fn=select_mask, outputs=[status_text])
 
-    complete_polygon_btn.click(
-        fn=complete_polygon,
-        outputs=[manual_preview, status_text, annotated_display, input_image],
-    )
-
     cancel_polygon_btn.click(
         fn=cancel_polygon, outputs=[annotated_display, status_text, input_image]
     )
@@ -584,7 +525,13 @@ with gr.Blocks(title="SAM Interactive Annotation Tool") as demo:
     add_label_btn.click(
         fn=add_annotation,
         inputs=[label_input],
-        outputs=[annotated_display, status_text, label_input, manual_preview],
+        outputs=[
+            annotated_display,
+            status_text,
+            label_input,
+            input_image,
+            mask_gallery,
+        ],
     )
 
     export_btn.click(fn=export_annotations, outputs=[csv_output, status_text])
@@ -599,7 +546,6 @@ with gr.Blocks(title="SAM Interactive Annotation Tool") as demo:
             label_input,
             csv_output,
             manual_buttons,
-            manual_preview,
         ],
     )
 
